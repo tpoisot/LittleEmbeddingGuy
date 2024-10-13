@@ -3,6 +3,7 @@ using DataFrames
 import CSV
 using GLMakie
 using StatsBase
+using SDeMo
 
 # Load virionette
 vir = DataFrame(CSV.File("virionette.csv"; types=String))
@@ -47,27 +48,38 @@ training_viruses = unique(vir.virus_genus[findall(!isequal("Betacoronavirus"), v
 # Network we can subsample for training
 T = subgraph(B, training_viruses, training_hosts)
 
-tv = sample(training_viruses, 40; replace=false)
-th = sample(training_hosts, 40; replace=false)
-S = simplify(subgraph(T, tv, th))
-O = render(Quantitative{Float32}, copy(S))
-P = linearfilter(S)
+outputs = DataFrame(out=Float64[], in=Float64[], co=Float64[], rank=Int[], mcc=Float64[], thr=Float64[])
 
-impute!(O, render(Quantitative{Float32}, S), P; rank=10)
+for dout in 0:10
+    @info "out: $(dout)"
+    for din in 0:(10-dout)
+        @info "\tinL $(din)"
+        for dco in 0:(10-dout+din)
+            @info "\t\tco: $(dco)"
+            for r in 1:10
+                @info "\t\t\trnk: $(r)"
+                for rep in 1:5
+                    try
+                        tv = sample(training_viruses, 40; replace=false)
+                        th = sample(training_hosts, 40; replace=false)
+                        S = simplify(subgraph(T, tv, th))
+                        O = render(Quantitative{Float32}, copy(S))
+                        P = linearfilter(S; α=[0.0, dout, din, dco])
 
-thr = LinRange(extrema(Array(O))..., 100)
-TP = [sum((Array(O) .>= t) .& Array(S)) for t in thr]
-FP = [sum((Array(O) .>= t) .& .!Array(S)) for t in thr]
-TN = [sum((Array(O) .< t) .& .!Array(S)) for t in thr]
-FN = [sum((Array(O) .< t) .& Array(S)) for t in thr]
+                        impute!(O, render(Quantitative{Float32}, S), P; rank=r)
+                        thr = LinRange(extrema(Array(O))..., 100)
+                        C = [ConfusionMatrix(vec(Array(O)), vec(Array(S)), t) for t in thr]
+                        bmcc, idx = findmax(mcc.(C))
+                        push!(outputs, [dout, din, dco, r, bmcc, thr[idx]])
+                    catch error
+                        continue
+                    end
+                end
+            end
+        end
+    end
+end
 
-TPR = TP ./ (TP .+ FN)
-TNR = TN ./ (TN .+ FP)
-Y = TPR .+ TNR .- 1.0
 
-lines(thr, Y)
-
-# If we want to do actual out-of-bag prediction, we can! We just need to do the training
-# without Betacoronaviruses and Chiroptera - this is not really difficult at all. Maybe the
-# proper validation scheme is actually to draw random samples of 10x10 where the viruses
-# cannot be βcov, and the host cannot be a bat, and then get freaky with it
+# Plot the rank v. mcc tuning curve
+scatter(outputs.r, outputs.mcc)
